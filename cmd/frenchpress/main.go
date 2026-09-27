@@ -16,7 +16,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -25,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/milligan22963/french-press/internal/logging"
 	"github.com/milligan22963/french-press/internal/paths"
 	"github.com/milligan22963/french-press/internal/tarpit"
 )
@@ -38,9 +38,19 @@ func main() {
 		maxDelay        = flag.Duration("max-delay", 2*time.Second, "maximum delay between drip bytes")
 		maxBrewTime     = flag.Duration("max-brew-time", 10*time.Minute, "hard cap on how long a single connection is held open")
 		maxConcurrent   = flag.Int("max-concurrent", 500, "maximum number of connections brewing at once; protects your own resources under a scan flood")
+		logConfig       = flag.String("log-config", "", "path to a pflog YAML file (see configs/log.example.yaml); if empty, logs text to stdout at Information")
 		includeDefaults = flag.Bool("include-defaults", true, "include French Press's built-in bad-path list alongside any -bad-paths file (overrides the file's include_defaults setting if explicitly passed)")
 	)
 	flag.Parse()
+
+	log, err := logging.Load(*logConfig)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "french press: log config: %v\n", err)
+		os.Exit(1)
+	}
+	// SIGUSR1 dumps the backlog, so a quiet-but-healthy tarpit can be told
+	// apart from a wedged one without waiting for an Error.
+	defer log.EnableSignalDump(syscall.SIGUSR1)()
 
 	// Detect whether -include-defaults was explicitly passed, so it can
 	// override the YAML file's include_defaults setting only when the
@@ -57,13 +67,14 @@ func main() {
 		log.Fatalf("french press: %v", err)
 	}
 	matcher := paths.NewMatcher(badPathList)
-	log.Printf("french press: brewing against %d bad path(s)", len(badPathList))
+	log.Informationf("french press: brewing against %d bad path(s)", len(badPathList))
 
 	cfg := &tarpit.Config{
 		MinDelay:      *minDelay,
 		MaxDelay:      *maxDelay,
 		MaxBrewTime:   *maxBrewTime,
 		MaxConcurrent: *maxConcurrent,
+		Log:           log,
 	}
 
 	var proxy *httputil.ReverseProxy
@@ -98,7 +109,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("french press listening on %s", *addr)
+		log.Informationf("french press listening on %s", *addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("french press: %v", err)
 		}
@@ -110,7 +121,7 @@ func main() {
 	<-sigCh
 
 	fmt.Println()
-	log.Println("french press: shutting down...")
+	log.Information("french press: shutting down...")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)

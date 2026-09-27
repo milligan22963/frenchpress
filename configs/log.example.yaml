@@ -1,0 +1,14 @@
+# pflog configuration for French Press, passed via -log-config.
+# Same format as pflog's own settings.yaml: https://github.com/PageFaultCode/pflog
+settings:
+  level: Information      # Trace, Debug, Information, Warning, Error, Fatal
+  trigger_level: Error    # at or above this, the whole backlog is dumped
+  backlog: 500            # entries kept in memory for a trigger/SIGUSR1 dump
+formatters:
+  - id: text
+    filename: stdout
+  - id: json              # JSON Lines: one record per brew event
+    filename: "/var/log/frenchpress.json"
+    max_size_mb: 10       # rotate rather than grow without bound
+    max_backups: 5
+    compress: true

@@ -6,11 +6,12 @@ package tarpit
 import (
 	"bufio"
 	"context"
-	"log"
 	"math/rand"
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/PageFaultCode/pflog"
 )
 
 // Config controls brewing behavior. All fields have sane defaults applied
@@ -28,6 +29,9 @@ type Config struct {
 	// across all listeners sharing this Config's semaphore. Zero means
 	// unlimited (not recommended on anything internet-facing).
 	MaxConcurrent int
+
+	// Log receives brew start/end and capacity events. Nil discards.
+	Log *pflog.Log
 
 	sem chan struct{}
 }
@@ -73,6 +77,23 @@ func (c *Config) release() {
 	}
 }
 
+// discardLog backs a nil Config.Log: a pflog.Log with no output targets
+// writes nothing.
+var discardLog = pflog.New()
+
+func (c *Config) logger() *pflog.Log {
+	if c.Log == nil {
+		return discardLog
+	}
+	return c.Log
+}
+
+// logHeld records how long a brewed connection was held and why it ended —
+// the per-connection dataset the tarpit exists to produce.
+func logHeld(log *pflog.Log, addr string, start time.Time, outcome *string) {
+	log.Informationf("french press: %s held %s (%s)", addr, time.Since(start).Round(time.Second), *outcome)
+}
+
 func (c *Config) randomDelay() time.Duration {
 	span := c.MaxDelay - c.MinDelay
 	if span <= 0 {
@@ -88,14 +109,17 @@ func (c *Config) randomDelay() time.Duration {
 func BrewRaw(ctx context.Context, conn net.Conn, cfg *Config) {
 	defer conn.Close()
 	addr := conn.RemoteAddr().String()
+	log := cfg.logger()
 
 	if !cfg.acquire() {
-		log.Printf("french press: at capacity, dropping %s", addr)
+		log.Warningf("french press: at capacity, dropping %s", addr)
 		return
 	}
 	defer cfg.release()
 
-	log.Printf("french press: brewing raw connection from %s", addr)
+	log.Informationf("french press: brewing raw connection from %s", addr)
+	outcome := "context cancelled"
+	defer logHeld(log, addr, time.Now(), &outcome)
 
 	w := bufio.NewWriter(conn)
 
@@ -115,11 +139,11 @@ func BrewRaw(ctx context.Context, conn net.Conn, cfg *Config) {
 		}
 
 		if _, err := w.Write([]byte{byte(rand.Intn(256))}); err != nil {
-			log.Printf("french press: %s gave up", addr)
+			outcome = "peer gave up"
 			return
 		}
 		if err := w.Flush(); err != nil {
-			log.Printf("french press: %s gave up on flush", addr)
+			outcome = "peer gave up on flush"
 			return
 		}
 
@@ -129,7 +153,7 @@ func BrewRaw(ctx context.Context, conn net.Conn, cfg *Config) {
 		case <-time.After(cfg.randomDelay()):
 		}
 	}
-	log.Printf("french press: %s brewed to completion (rare)", addr)
+	outcome = "brewed to completion (rare)"
 }
 
 // BrewHTTP holds an HTTP connection open using chunked transfer-encoding and
@@ -143,9 +167,10 @@ func BrewRaw(ctx context.Context, conn net.Conn, cfg *Config) {
 // full control over pacing.
 func BrewHTTP(ctx context.Context, w http.ResponseWriter, r *http.Request, cfg *Config) {
 	addr := r.RemoteAddr
+	log := cfg.logger()
 
 	if !cfg.acquire() {
-		log.Printf("french press: at capacity, dropping %s", addr)
+		log.Warningf("french press: at capacity, dropping %s %s from %s", r.Method, r.URL.Path, addr)
 		http.Error(w, "", http.StatusServiceUnavailable)
 		return
 	}
@@ -162,12 +187,14 @@ func BrewHTTP(ctx context.Context, w http.ResponseWriter, r *http.Request, cfg *
 
 	conn, bufrw, err := hijacker.Hijack()
 	if err != nil {
-		log.Printf("french press: hijack failed for %s: %v", addr, err)
+		log.Warningf("french press: hijack failed for %s: %v", addr, err)
 		return
 	}
 	defer conn.Close()
 
-	log.Printf("french press: brewing HTTP request %s %s from %s", r.Method, r.URL.Path, addr)
+	log.Informationf("french press: brewing HTTP request %s %s from %s", r.Method, r.URL.Path, addr)
+	outcome := "context cancelled"
+	defer logHeld(log, addr, time.Now(), &outcome)
 
 	headers := "HTTP/1.1 200 OK\r\n" +
 		"Server: Apache\r\n" +
@@ -175,9 +202,11 @@ func BrewHTTP(ctx context.Context, w http.ResponseWriter, r *http.Request, cfg *
 		"Transfer-Encoding: chunked\r\n" +
 		"Connection: close\r\n\r\n"
 	if _, err := bufrw.WriteString(headers); err != nil {
+		outcome = "peer gave up"
 		return
 	}
 	if err := bufrw.Flush(); err != nil {
+		outcome = "peer gave up on flush"
 		return
 	}
 
@@ -191,11 +220,11 @@ func BrewHTTP(ctx context.Context, w http.ResponseWriter, r *http.Request, cfg *
 
 		// One-byte chunk: size line, the byte, trailing CRLF.
 		if _, err := bufrw.WriteString("1\r\nX\r\n"); err != nil {
-			log.Printf("french press: %s gave up", addr)
+			outcome = "peer gave up"
 			return
 		}
 		if err := bufrw.Flush(); err != nil {
-			log.Printf("french press: %s gave up on flush", addr)
+			outcome = "peer gave up on flush"
 			return
 		}
 
@@ -207,7 +236,7 @@ func BrewHTTP(ctx context.Context, w http.ResponseWriter, r *http.Request, cfg *
 	}
 	// Deliberately never send the "0\r\n\r\n" terminating chunk — we just
 	// let the deadline (or the peer) close the connection.
-	log.Printf("french press: %s brewed to completion (rare)", addr)
+	outcome = "brewed to completion (rare)"
 }
 
 // brewHTTPFallback stalls using the standard http.Flusher interface when

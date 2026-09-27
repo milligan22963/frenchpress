@@ -95,6 +95,39 @@ paths:
 | `-max-brew-time`    | `10m`     | Hard cap on how long a single connection is held open                     |
 | `-max-concurrent`   | `500`     | Max connections brewing at once — protects _your_ resources under a flood |
 | `-include-defaults` | `true`    | Include built-in bad paths alongside `-bad-paths` file (overrides file)   |
+| `-log-config`       | _(empty)_ | [pflog](https://github.com/PageFaultCode/pflog) YAML file; text to stdout if omitted |
+
+## Logging
+
+Logging goes through [pflog](https://github.com/PageFaultCode/pflog). With
+no `-log-config`, French Press logs text to stdout at `Information`. To
+change level, add file output or rotation, pass a pflog configuration file:
+
+```bash
+./frenchpress -log-config configs/log.example.yaml
+```
+
+```yaml
+# configs/log.example.yaml
+settings:
+  level: Information
+  trigger_level: Error # at or above this, the whole backlog is dumped
+  backlog: 500
+formatters:
+  - id: text
+    filename: stdout
+  - id: json # JSON Lines, one record per line
+    filename: "/var/log/frenchpress.json"
+    max_size_mb: 10
+    max_backups: 5
+    compress: true
+```
+
+Each brewed connection logs a start line (method, path, source) and an end
+line with how long it was held and why it ended. Connections still brewing
+when the process exits get no end line.
+
+`kill -USR1 <pid>` dumps the in-memory backlog on demand.
 
 ## Deployment notes
 
@@ -118,7 +151,7 @@ PRs welcome — this started as a "wouldn't it be funny if" idea, so
 extensions, better logging/metrics, a Prometheus endpoint, an
 allow-list mode, whatever. Keep the core philosophy: waste their time,
 never send anything actually harmful, and never risk taking out
-infrastructure you don't own. Will see about incoporating pflog from my other repo set for logging.
+infrastructure you don't own.
 
 ## License
 
