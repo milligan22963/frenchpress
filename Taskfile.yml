@@ -1,0 +1,25 @@
+# https://taskfile.dev
+
+version: '3'
+
+vars:
+  GREETING: Hello, World!
+
+tasks:
+  build:
+    cmds:
+      - go build -o frenchpress ./cmd/frenchpress
+  release:
+    cmds:
+      - go build -ldflags="-s -w" -o frenchpress ./cmd/frenchpress
+  test:
+    cmds:
+      - go test ./...
+  run:
+    cmds:
+      - ./frenchpress -addr :8080 -backend http://127.0.0.1:3000
+
+  default:
+    cmds:
+      - echo "{{.GREETING}}"
+    silent: true

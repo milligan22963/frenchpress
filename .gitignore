@@ -1,0 +1,4 @@
+/frenchpress
+/dist/
+*.log
+.DS_Store

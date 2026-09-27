@@ -1,0 +1,18 @@
+# Example bad-paths configuration for French Press.
+#
+# `paths` is a list of URL path prefixes. Any request whose path starts
+# with one of these gets brewed in the tarpit instead of reaching your
+# real backend.
+#
+# `include_defaults` controls whether French Press's built-in list
+# (see internal/paths/paths.go) is merged in alongside your custom list.
+# Defaults to true if omitted. The -include-defaults CLI flag, if passed
+# explicitly, overrides whatever is set here.
+
+include_defaults: true
+
+paths:
+  - /old-admin-panel
+  - /backup.sql
+  - /.htpasswd
+  - /debug/pprof

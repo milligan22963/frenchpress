@@ -1,0 +1,241 @@
+// Package tarpit implements the slow-drip connection handlers: raw TCP and
+// HTTP-chunked variants that hold a connection open and dribble bytes at a
+// deliberately glacial pace, tying up whatever scanner or bot connected.
+package tarpit
+
+import (
+	"bufio"
+	"context"
+	"log"
+	"math/rand"
+	"net"
+	"net/http"
+	"time"
+)
+
+// Config controls brewing behavior. All fields have sane defaults applied
+// by DefaultConfig; zero-value Config is not safe to use directly.
+type Config struct {
+	// MinDelay/MaxDelay bound the random pause between drips.
+	MinDelay time.Duration
+	MaxDelay time.Duration
+
+	// MaxBrewTime is the hard cap on how long a single connection is held
+	// open, regardless of whether the peer is still reading.
+	MaxBrewTime time.Duration
+
+	// MaxConcurrent limits how many connections may be brewing at once,
+	// across all listeners sharing this Config's semaphore. Zero means
+	// unlimited (not recommended on anything internet-facing).
+	MaxConcurrent int
+
+	sem chan struct{}
+}
+
+// DefaultConfig returns reasonable defaults: 0.5-2s between drips, a 10
+// minute hard cap per connection, and up to 500 concurrent brews.
+func DefaultConfig() *Config {
+	c := &Config{
+		MinDelay:      500 * time.Millisecond,
+		MaxDelay:      2 * time.Second,
+		MaxBrewTime:   10 * time.Minute,
+		MaxConcurrent: 500,
+	}
+	c.init()
+	return c
+}
+
+func (c *Config) init() {
+	if c.MaxConcurrent > 0 && c.sem == nil {
+		c.sem = make(chan struct{}, c.MaxConcurrent)
+	}
+}
+
+func (c *Config) acquire() bool {
+	c.init()
+	if c.sem == nil {
+		return true
+	}
+	select {
+	case c.sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Config) release() {
+	if c.sem != nil {
+		select {
+		case <-c.sem:
+		default:
+		}
+	}
+}
+
+func (c *Config) randomDelay() time.Duration {
+	span := c.MaxDelay - c.MinDelay
+	if span <= 0 {
+		return c.MinDelay
+	}
+	return c.MinDelay + time.Duration(rand.Int63n(int64(span)))
+}
+
+// BrewRaw holds a raw TCP connection open and dribbles a random byte at a
+// time, forever, until MaxBrewTime elapses or the peer disconnects. Useful
+// behind a listener that isn't speaking HTTP (SSH probes, generic port
+// scanners, etc.).
+func BrewRaw(ctx context.Context, conn net.Conn, cfg *Config) {
+	defer conn.Close()
+	addr := conn.RemoteAddr().String()
+
+	if !cfg.acquire() {
+		log.Printf("french press: at capacity, dropping %s", addr)
+		return
+	}
+	defer cfg.release()
+
+	log.Printf("french press: brewing raw connection from %s", addr)
+
+	w := bufio.NewWriter(conn)
+
+	// Read (and discard) whatever the peer sent, so the connection looks
+	// alive rather than instantly suspicious. We don't care about the
+	// content, just that we drained it.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	discard := make([]byte, 1024)
+	conn.Read(discard) //nolint:errcheck
+
+	deadline := time.Now().Add(cfg.MaxBrewTime)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		if _, err := w.Write([]byte{byte(rand.Intn(256))}); err != nil {
+			log.Printf("french press: %s gave up", addr)
+			return
+		}
+		if err := w.Flush(); err != nil {
+			log.Printf("french press: %s gave up on flush", addr)
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(cfg.randomDelay()):
+		}
+	}
+	log.Printf("french press: %s brewed to completion (rare)", addr)
+}
+
+// BrewHTTP holds an HTTP connection open using chunked transfer-encoding and
+// dribbles a one-byte chunk at a time, never sending the terminating chunk,
+// until MaxBrewTime elapses or the peer disconnects.
+//
+// It writes the response directly to the underlying connection (via
+// http.Hijacker), because net/http's normal ResponseWriter machinery
+// doesn't let us hold a response open indefinitely without a handler
+// goroutine blocking in a way the stdlib is happy with — hijacking gives
+// full control over pacing.
+func BrewHTTP(ctx context.Context, w http.ResponseWriter, r *http.Request, cfg *Config) {
+	addr := r.RemoteAddr
+
+	if !cfg.acquire() {
+		log.Printf("french press: at capacity, dropping %s", addr)
+		http.Error(w, "", http.StatusServiceUnavailable)
+		return
+	}
+	defer cfg.release()
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		// Fallback for a ResponseWriter that can't be hijacked (rare, e.g.
+		// under some test harnesses): just stall the handler goroutine
+		// itself using chunked encoding via the normal Flusher path.
+		brewHTTPFallback(ctx, w, cfg)
+		return
+	}
+
+	conn, bufrw, err := hijacker.Hijack()
+	if err != nil {
+		log.Printf("french press: hijack failed for %s: %v", addr, err)
+		return
+	}
+	defer conn.Close()
+
+	log.Printf("french press: brewing HTTP request %s %s from %s", r.Method, r.URL.Path, addr)
+
+	headers := "HTTP/1.1 200 OK\r\n" +
+		"Server: Apache\r\n" +
+		"Content-Type: text/html\r\n" +
+		"Transfer-Encoding: chunked\r\n" +
+		"Connection: close\r\n\r\n"
+	if _, err := bufrw.WriteString(headers); err != nil {
+		return
+	}
+	if err := bufrw.Flush(); err != nil {
+		return
+	}
+
+	deadline := time.Now().Add(cfg.MaxBrewTime)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// One-byte chunk: size line, the byte, trailing CRLF.
+		if _, err := bufrw.WriteString("1\r\nX\r\n"); err != nil {
+			log.Printf("french press: %s gave up", addr)
+			return
+		}
+		if err := bufrw.Flush(); err != nil {
+			log.Printf("french press: %s gave up on flush", addr)
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(cfg.randomDelay()):
+		}
+	}
+	// Deliberately never send the "0\r\n\r\n" terminating chunk — we just
+	// let the deadline (or the peer) close the connection.
+	log.Printf("french press: %s brewed to completion (rare)", addr)
+}
+
+// brewHTTPFallback stalls using the standard http.Flusher interface when
+// hijacking isn't available. Less precise timing control, but works
+// anywhere net/http does.
+func brewHTTPFallback(ctx context.Context, w http.ResponseWriter, cfg *Config) {
+	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("Server", "Apache")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, ok := w.(http.Flusher)
+	deadline := time.Now().Add(cfg.MaxBrewTime)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		if _, err := w.Write([]byte{byte('X')}); err != nil {
+			return
+		}
+		if ok {
+			flusher.Flush()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(cfg.randomDelay()):
+		}
+	}
+}
