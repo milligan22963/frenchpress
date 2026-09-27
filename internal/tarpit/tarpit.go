@@ -178,10 +178,10 @@ func BrewHTTP(ctx context.Context, w http.ResponseWriter, r *http.Request, cfg *
 
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
-		// Fallback for a ResponseWriter that can't be hijacked (rare, e.g.
-		// under some test harnesses): just stall the handler goroutine
-		// itself using chunked encoding via the normal Flusher path.
-		brewHTTPFallback(ctx, w, cfg)
+		// Fallback for a ResponseWriter that can't be hijacked (HTTP/2,
+		// which clients negotiate over TLS, and some test harnesses): stall
+		// the handler goroutine itself, dripping via the Flusher path.
+		brewHTTPFallback(ctx, w, r, cfg)
 		return
 	}
 
@@ -242,7 +242,12 @@ func BrewHTTP(ctx context.Context, w http.ResponseWriter, r *http.Request, cfg *
 // brewHTTPFallback stalls using the standard http.Flusher interface when
 // hijacking isn't available. Less precise timing control, but works
 // anywhere net/http does.
-func brewHTTPFallback(ctx context.Context, w http.ResponseWriter, cfg *Config) {
+func brewHTTPFallback(ctx context.Context, w http.ResponseWriter, r *http.Request, cfg *Config) {
+	log := cfg.logger()
+	log.Informationf("french press: brewing %s request %s %s from %s", r.Proto, r.Method, r.URL.Path, r.RemoteAddr)
+	outcome := "context cancelled"
+	defer logHeld(log, r.RemoteAddr, time.Now(), &outcome)
+
 	w.Header().Set("Content-Type", "text/html")
 	w.Header().Set("Server", "Apache")
 	w.WriteHeader(http.StatusOK)
@@ -256,6 +261,7 @@ func brewHTTPFallback(ctx context.Context, w http.ResponseWriter, cfg *Config) {
 		default:
 		}
 		if _, err := w.Write([]byte{byte('X')}); err != nil {
+			outcome = "peer gave up"
 			return
 		}
 		if ok {
@@ -267,4 +273,5 @@ func brewHTTPFallback(ctx context.Context, w http.ResponseWriter, cfg *Config) {
 		case <-time.After(cfg.randomDelay()):
 		}
 	}
+	outcome = "brewed to completion (rare)"
 }

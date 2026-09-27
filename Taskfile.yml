@@ -18,6 +18,41 @@ tasks:
   run:
     cmds:
       - ./frenchpress -addr :8080 -backend http://127.0.0.1:3000
+  # Front-door shim on :80: tarpits bad paths, proxies everything else to
+  # BACKEND. Override with e.g. `task shim BACKEND=http://127.0.0.1:9000`.
+  # setcap is re-applied every run because a rebuild drops the capability.
+  shim:
+    deps: [build]
+    vars:
+      ADDR: '{{.ADDR | default ":80"}}'
+      BACKEND: '{{.BACKEND | default "http://127.0.0.1:3000"}}'
+    cmds:
+      - sudo setcap cap_net_bind_service=+ep ./frenchpress
+      - ./frenchpress -addr {{.ADDR}} -backend {{.BACKEND}}
+  # HTTPS shim on :443 with your own certificate, plus :80 -> HTTPS redirect.
+  # `task shim-tls TLS_CERT=/path/cert.pem TLS_KEY=/path/key.pem`
+  shim-tls:
+    deps: [build]
+    requires:
+      vars: [TLS_CERT, TLS_KEY]
+    vars:
+      BACKEND: '{{.BACKEND | default "http://127.0.0.1:3000"}}'
+    cmds:
+      - sudo setcap cap_net_bind_service=+ep ./frenchpress
+      - ./frenchpress -addr :443 -redirect-addr :80 -tls-cert {{.TLS_CERT}} -tls-key {{.TLS_KEY}} -backend {{.BACKEND}}
+  # HTTPS shim on :443 with Let's Encrypt certificates, plus :80 for
+  # redirects and ACME challenges.
+  # `task shim-autocert DOMAINS=example.com,www.example.com EMAIL=you@example.com`
+  shim-autocert:
+    deps: [build]
+    requires:
+      vars: [DOMAINS]
+    vars:
+      BACKEND: '{{.BACKEND | default "http://127.0.0.1:3000"}}'
+      CACHE: '{{.CACHE | default "autocert-cache"}}'
+    cmds:
+      - sudo setcap cap_net_bind_service=+ep ./frenchpress
+      - ./frenchpress -addr :443 -redirect-addr :80 -autocert {{.DOMAINS}} -autocert-email "{{.EMAIL}}" -autocert-cache {{.CACHE}} -backend {{.BACKEND}}
 
   default:
     cmds:
