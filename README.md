@@ -1,5 +1,7 @@
 # French Press ☕
 
+[![CI](https://github.com/milligan22963/frenchpress/actions/workflows/ci.yml/badge.svg)](https://github.com/milligan22963/frenchpress/actions/workflows/ci.yml)
+
 A slow-drip HTTP honeypot for unsolicited scanner traffic.
 
 French Press listens on an HTTP port. Any request matching a configurable
@@ -36,6 +38,10 @@ go looking for `wp-login.php` on a server that has never run WordPress.
   exploit payloads — just very, very slow, very boring bytes.
 
 ## Quick start
+
+Prebuilt Linux binaries for `amd64` and `arm64` are on the
+[releases page](https://github.com/milligan22963/frenchpress/releases),
+each with a `checksums.txt`. Or build from source:
 
 ```bash
 go build -o frenchpress ./cmd/frenchpress
@@ -179,6 +185,7 @@ paths:
 | `-redirect-addr`    | _(empty)_ | With TLS on, plain-HTTP listener: tarpits bad paths, redirects the rest   |
 | `-trust-forwarded`  | `false`   | Keep incoming `X-Forwarded-Proto`/`-Host` instead of overwriting them      |
 | `-read-header-timeout` | `10s`  | Time allowed to read request headers                                      |
+| `-version`          | `false`   | Print the version and exit                                                |
 
 ## Logging
 
@@ -227,6 +234,20 @@ when the process exits get no end line.
   Keep the tarpit fully inside infrastructure you own.
 - **Logs are your dataset.** Every brewed connection is logged with source,
   path, and duration — that's the fun part.
+
+## CI and releases
+
+Every push to `main` and every pull request runs `gofmt`, `go vet`,
+`go test -race` and a build against both the `go.mod` Go version and the
+latest stable Go, plus [govulncheck](https://go.dev/doc/security/vuln/).
+
+Pushing a `v*` tag builds static Linux `amd64` and `arm64` binaries and
+publishes them as a GitHub release with generated notes:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
 
 ## Contributing
 

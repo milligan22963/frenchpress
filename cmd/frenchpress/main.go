@@ -35,6 +35,9 @@ import (
 	"github.com/milligan22963/french-press/internal/tarpit"
 )
 
+// version is set at release build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	var (
 		addr            = flag.String("addr", ":8080", "address to listen on")
@@ -54,8 +57,14 @@ func main() {
 		redirectAddr    = flag.String("redirect-addr", "", "with TLS enabled, also listen for plain HTTP here (e.g. :80): bad paths are tarpitted, everything else is redirected to HTTPS; required for -autocert HTTP-01 challenges")
 		trustForwarded  = flag.Bool("trust-forwarded", false, "keep incoming X-Forwarded-Proto/X-Forwarded-Host instead of overwriting them; enable only when French Press sits behind a proxy you control")
 		readHdrTimeout  = flag.Duration("read-header-timeout", 10*time.Second, "time allowed to read request headers; guards proxied traffic against slowloris clients")
+		showVersion     = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("french press", version)
+		return
+	}
 
 	log, err := logging.Load(*logConfig)
 	if err != nil {
