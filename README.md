@@ -50,6 +50,81 @@ starting point.
 Or run it standalone with no backend — anything not on the bad-path list
 just gets a 404.
 
+## Running as a shim on port 80
+
+French Press can sit directly on port 80 in front of your real site:
+requests to bad paths get tarpitted, and everything else is proxied to
+`-backend` unchanged. The proxy passes the original `Host` header through,
+adds `X-Forwarded-For`, and supports WebSocket upgrades and server-sent
+events.
+
+```bash
+go build -o frenchpress ./cmd/frenchpress
+# Binding :80 needs privilege; grant just that capability instead of running
+# as root. Re-run after every rebuild — a new binary loses the capability.
+sudo setcap cap_net_bind_service=+ep ./frenchpress
+./frenchpress -addr :80 -backend http://127.0.0.1:3000
+```
+
+Or with [Task](https://taskfile.dev), which builds, applies the capability,
+and starts the shim:
+
+```bash
+task shim                                   # :80 -> http://127.0.0.1:3000
+task shim BACKEND=http://127.0.0.1:9000     # different backend
+```
+
+Under systemd, use `AmbientCapabilities=CAP_NET_BIND_SERVICE` in the unit
+instead of `setcap`.
+
+### HTTPS on port 443
+
+French Press can terminate TLS itself, either from certificate files or
+with automatic [Let's Encrypt](https://letsencrypt.org) certificates. Add
+`-redirect-addr :80` to also listen on plain HTTP: bad paths there are
+still tarpitted, and everything else gets a `301` to HTTPS.
+
+```bash
+# Your own certificate (PEM files)
+./frenchpress -addr :443 -redirect-addr :80 \
+  -tls-cert /etc/ssl/example.com.crt -tls-key /etc/ssl/example.com.key \
+  -backend http://127.0.0.1:3000
+
+# Let's Encrypt, fetched and renewed automatically
+./frenchpress -addr :443 -redirect-addr :80 \
+  -autocert example.com,www.example.com -autocert-email you@example.com \
+  -autocert-cache /var/lib/frenchpress/autocert \
+  -backend http://127.0.0.1:3000
+```
+
+Or with Task:
+
+```bash
+task shim-tls TLS_CERT=/etc/ssl/example.com.crt TLS_KEY=/etc/ssl/example.com.key
+task shim-autocert DOMAINS=example.com,www.example.com EMAIL=you@example.com
+```
+
+Notes:
+
+- `-autocert` needs the named hosts' DNS pointed at this machine and ports
+  80 and/or 443 reachable from the internet, so Let's Encrypt can validate.
+  Keep `-autocert-cache` on persistent storage: losing it means reissuing,
+  and Let's Encrypt rate-limits that.
+- HTTPS is served with TLS 1.2 minimum, and HTTP/2 is negotiated
+  automatically. Bad paths are tarpitted over HTTP/1.1 and HTTP/2 alike.
+- Proxied requests get `X-Forwarded-Proto` and `X-Forwarded-Host` set from
+  the client's connection to French Press, overwriting whatever the client
+  sent. If French Press sits behind another proxy of yours that sets them,
+  pass `-trust-forwarded` to keep them.
+- Request headers must arrive within `-read-header-timeout` (default
+  `10s`), which protects proxied traffic from slowloris-style clients. It
+  doesn't affect the slow drip, which is on the response side.
+
+Limitations to be aware of when French Press is your front door:
+
+- Only one backend; no host- or path-based routing to multiple upstreams.
+- Backend failures return a bare `502 Bad Gateway`.
+
 ## Configuring bad paths
 
 By default, French Press uses a small built-in list of common scanner
@@ -96,6 +171,14 @@ paths:
 | `-max-concurrent`   | `500`     | Max connections brewing at once — protects _your_ resources under a flood |
 | `-include-defaults` | `true`    | Include built-in bad paths alongside `-bad-paths` file (overrides file)   |
 | `-log-config`       | _(empty)_ | [pflog](https://github.com/PageFaultCode/pflog) YAML file; text to stdout if omitted |
+| `-tls-cert`         | _(empty)_ | PEM certificate; with `-tls-key`, serves HTTPS on `-addr`                 |
+| `-tls-key`          | _(empty)_ | PEM private key for `-tls-cert`                                           |
+| `-autocert`         | _(empty)_ | Comma-separated hostnames to get Let's Encrypt certificates for           |
+| `-autocert-cache`   | `autocert-cache` | Directory `-autocert` stores certificates in                       |
+| `-autocert-email`   | _(empty)_ | Contact email registered with Let's Encrypt (optional)                    |
+| `-redirect-addr`    | _(empty)_ | With TLS on, plain-HTTP listener: tarpits bad paths, redirects the rest   |
+| `-trust-forwarded`  | `false`   | Keep incoming `X-Forwarded-Proto`/`-Host` instead of overwriting them      |
+| `-read-header-timeout` | `10s`  | Time allowed to read request headers                                      |
 
 ## Logging
 
